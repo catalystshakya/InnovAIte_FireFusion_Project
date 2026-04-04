@@ -1,0 +1,35 @@
+services:
+
+  firefusion-api:
+    image: firefusion/firefusion-api
+    build: ./firefusion-api/.
+    ports: 
+      - 80:80
+
+  model-api:
+    image: firefusion/model-api
+    build: ./model-api/.
+    ports: 
+      - 81:80
+
+  aggregator-api:
+    image: firefusion/aggregator-api
+    build: ./aggregator-api/.
+    ports: 
+      - 82:80
+    depends_on:
+      - aggregator-db
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@aggregator-db:5432/firefusion_data_engineering
+
+  aggregator-db:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: firefusion_data_engineering
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - ./utilities/aggregator-init.sql:/docker-entrypoint-initdb.d/01-schema.sql
+      - ./seed.sql:/docker-entrypoint-initdb.d/02-seed.sql
+    ports:
+      - "5432:5432"
