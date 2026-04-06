@@ -12,7 +12,18 @@ import os
 
 
 def load_data(satellite_path, bushfire_path):
-    """Load satellite and bushfire datasets as GeoDataFrames."""
+    """ 
+    Loads satellite and bushfire datasets as GeoDataFrames with WKT Geometry.
+    
+    Parameters:
+        satellite_path (str): Path to CSV with VIIRS/MODIS detections (datetime, geometry, frp_peak, frp_cumulative columns)
+        bushfire_path (str): Path to CSV with bushfire polygons (fire_id, ignition_date, geometry columns)
+    
+    Returns:
+        viirs_gdf (GeoDataFrame): Satellite detections with Point/Polygon geometry, CRS EPSG:4326
+        bushfire_gdf (GeoDataFrame): Bushfire polygons with Polygon geometry, CRS EPSG:4326
+    """
+
     viirs_df = pd.read_csv(satellite_path)
     bushfire_df = pd.read_csv(bushfire_path)
     
@@ -32,7 +43,16 @@ def load_data(satellite_path, bushfire_path):
 
 
 def assign_synthetic_ids(bushfire_gdf):
-    """Assign synthetic IDs to fires without official IDs."""
+    """
+    Assign synthetic IDs to fires without official IDs.
+    
+    Parameters:
+        bushfire_gdf (GeoDataFrame): Bushfire records with fire_id column containign some NaN values
+    
+    Returns:
+        bushfire_gdf (GeoDataFrame): Same dataset with fire_id column filled; synthetic IDs start from -1
+    """
+
     null_mask = bushfire_gdf["fire_id"].isna()
     synthetic_ids = range(-1, -null_mask.sum() - 1, -1)
     bushfire_gdf.loc[null_mask, "fire_id"] = list(synthetic_ids)
@@ -40,7 +60,15 @@ def assign_synthetic_ids(bushfire_gdf):
 
 
 def spatial_join(viirs_gdf, bushfire_gdf):
-    """Perform spatial join between detections and fire polygons."""
+    """Perform spatial join between detections and fire polygons using geometry intersection.
+    
+    Parameters:
+        viirs_gdf (GeoDataFrame): Satellite detections with datetime, geometry, frp_peak, frp_cumulative
+        bushfire_gdf (GeoDataFrame): Bushfire polygons with filled fire_id, ignition_date, geometry columns
+    
+    Returns:
+        joined (GeoDataFrame): Inner join of detections to fires (intersects predicate); contains all viirs columns plus fire_id, ignition_date; datetime and ignition_date formated as UTC timezone-naive
+    """
     joined = gpd.sjoin(
         viirs_gdf,
         bushfire_gdf[["fire_id", "ignition_date", "geometry"]],
@@ -56,7 +84,15 @@ def spatial_join(viirs_gdf, bushfire_gdf):
 
 
 def filter_by_temporal_window(joined, window_days=120):
-    """Filter detections to temporal window around ignition."""
+    """Filter detections to temporal window around ignition and exlude fires with late detection.
+    
+    Parameters:
+        joined (GeoDataFrame): Matched detections from spatial_join() with datetime, ignition_date, fire_id
+        window_days (int): Max days after ignition to include detections (default 120); Safety net
+    
+    Returns:
+        joined (GeoDataFrame): Filtered dataset with only detections in [ignition_date - 1 day, ignition_date + window_days] and fires where first detection <= ignition_date + 4 days
+    """
     joined = joined[
         (joined["datetime"] >= (joined["ignition_date"] - pd.Timedelta(days=1))) &
         (joined["datetime"] <= (joined["ignition_date"] + pd.Timedelta(days=window_days)))
@@ -81,7 +117,15 @@ def filter_by_temporal_window(joined, window_days=120):
 
 
 def estimate_extinguish_dates(joined, gap_threshold_days=4):
-    """Estimate extinguish dates from detection gaps."""
+    """Infer fire extinguish dates from detection gaps.
+    
+    Parameters:
+        joined (GeoDataFrame): Filtered detections from filter_by_temporal_window() with fire_id, datetime
+        gap_threshold_days (int): Minimum gap in days to infer fire is extinguished (default 4)
+    
+    Returns:
+        extinguish_dates (DataFrame): Two columns [fire_id, extinguish_date]; extinguish_date is datetime of last detection before gap; one row per fire
+    """
     joined = joined.sort_values(["fire_id", "datetime"])
     
     # Calculate gaps between consecutive detections
@@ -112,7 +156,15 @@ def estimate_extinguish_dates(joined, gap_threshold_days=4):
 
 
 def merge_extinguish_dates(bushfire_gdf, extinguish_dates):
-    """Merge estimated extinguish dates onto bushfire dataset."""
+    """Add estimated extinguish dates onto bushfire dataset via left merge.
+    
+    Parameters:
+        bushfire_gdf (GeoDataFrame): Original bushfire records with fire_id column
+        extinguish_dates (DataFrame): Output from estimate_extinguish_dates() with [fire_id, extinguish_date]
+    
+    Returns:
+        bushfire_gdf (GeoDataFrame): Same dataset with new extinguish_date column (NaT for undetected fires);
+    """
     bushfire_gdf = bushfire_gdf.merge(extinguish_dates, on="fire_id", how="left")
     bushfire_gdf["extinguish_date"] = pd.to_datetime(bushfire_gdf["extinguish_date"])
     bushfire_gdf["ignition_date"] = pd.to_datetime(bushfire_gdf["ignition_date"]).dt.tz_localize(None)
@@ -121,7 +173,14 @@ def merge_extinguish_dates(bushfire_gdf, extinguish_dates):
 
 
 def calculate_duration(bushfire_gdf):
-    """Calculate fire duration and handle edge cases."""
+    """Calculate fire duration and handle late recorded ignition data edge cases.
+    
+    Parameters:
+        bushfire_gdf (GeoDataFrame): Bushfire records with ignition_date, extinguish_date (which may contain NaT)
+    
+    Returns:
+        bushfire_gdf (GeoDataFrame): Same dataset with new duration_days column (float, rounded to 2 decimals; NaT for fires without extinguish_date)
+    """
     # Handle late ignition dates
     lag_mask = bushfire_gdf["extinguish_date"] < bushfire_gdf["ignition_date"]
     bushfire_gdf.loc[lag_mask, "extinguish_date"] = (
@@ -138,7 +197,15 @@ def calculate_duration(bushfire_gdf):
 
 
 def extract_frp_severity(joined, bushfire_gdf):
-    """Extract peak and cumulative FRP severity measures."""
+    """Extract peak and cumulative FRP severity measures for each fire.
+    
+    Parameters:
+        joined (GeoDataFrame): Satellite detections from filter_by_temporal_window() with fire_id, frp_peak, frp_cumulative
+        bushfire_gdf (GeoDataFrame): Bushfire records with fire_id column
+    
+    Returns:
+        bushfire_gdf (GeoDataFrame): Same dataset with two new columns: peak_frp (max frp_peak per fire, NaN if undetected) and cumulative_frp (sum of frp_cumulative per fire, NaN if undetected)
+    """
     peak_severity = joined.groupby("fire_id")["frp_peak"].max().rename("peak_frp")
     bushfire_gdf = bushfire_gdf.merge(peak_severity, on="fire_id", how="left")
     
@@ -149,7 +216,15 @@ def extract_frp_severity(joined, bushfire_gdf):
 
 
 def classify_detection_status(joined, bushfire_gdf):
-    """Classify detection status and count detections."""
+    """Count satellite detections per fire and classify as detected or never_detected.
+    
+    Parameters:
+        joined (GeoDataFrame): Satellite detections from filter_by_temporal_window() with fire_id, datetime
+        bushfire_gdf (GeoDataFrame): Bushfire records with fire_id column
+    
+    Returns:
+        (GeoDataFrame): Same dataset with two new columns: viirs_detection_count (int, 0 for undetected) and detection_status (str: "never_detected" or "detected")
+    """
     detection_counts = (
         joined.groupby("fire_id")["datetime"]
         .count()
@@ -168,7 +243,14 @@ def classify_detection_status(joined, bushfire_gdf):
 
 
 def handle_undetected_fires(bushfire_gdf):
-    """Impute undetected small/medium fires; flag large/mega fires."""
+    """Impute undetected small/medium fires; flag large/mega fires as coverage gaps.
+    
+    Parameters:
+        bushfire_gdf (GeoDataFrame): Bushfire records with detection_status (detected/never_detected), size_class (small/medium/large/mega), ignition_date
+    
+    Returns:
+        bushfire_gdf (GeoDataFrame): Same dataset with modified columns for undetected fires: small/medium fires imputed with extinguish_date = ignition_date + 6 hours, detection_status = "imputed_same_day"; large/mega fires flagged with detection_status = "coverage_gap"
+    """
     # Small/medium undetected fires: impute as 6-hour burns
     small_mask = (
         (bushfire_gdf["detection_status"] == "never_detected") &
@@ -193,7 +275,17 @@ def handle_undetected_fires(bushfire_gdf):
 
 
 def finalize_and_export(bushfire_gdf, output_csv, output_geojson):
-    """Finalize dataset, reorder columns, and export."""
+    """Finalize dataset, reorder columns, and export.
+    
+    Parameters:
+        bushfire_gdf (GeoDataFrame): Complete processed bushfire dataset with all computed columns
+        output_csv (str): Output file path for CSV export (e.g., "unified_historic_fire_dataset.csv")
+        output_geojson (str): Output file path for GeoJSON export (e.g., "unified_historic_fire_dataset.geojson")
+    
+    Returns:
+        bushfire_gdf (GeoDataFrame): Same dataset with columns reordered to fixed sequence, sorted by ignition_date then fire_id, reprojected to EPSG:4326
+        writes CSV and GeoJSON files to disk, prints confirmation messages
+    """
     column_order = [
         "fire_id", "fire_name", "ignition_date", "extinguish_date", "duration_days",
         "detection_status", "season", "fire_type", "size_class", "area_ha", "perim_km",
@@ -216,7 +308,16 @@ def finalize_and_export(bushfire_gdf, output_csv, output_geojson):
 
 
 def main(output_csv="unified_historic_fire_dataset.csv", output_geojson="unified_historic_fire_dataset.geojson"):
-    """Main processing pipeline."""
+    """Execute complete pipeline: load data → spatial join → temporal filter → estimate extinguish → calculate duration → extract FRP → classify detections → handle undetected → export.
+    
+    Parameters:
+        output_csv (str): Output filename for CSV export (default "unified_historic_fire_dataset.csv")
+        output_geojson (str): Output filename for GeoJSON export (default "unified_historic_fire_dataset.geojson")
+    
+    Returns:
+        bushfire_gdf (GeoDataFrame): Complete processed dataset
+        writes CSV and GeoJSON files to script directory
+    """
     
     script_dir = os.path.dirname(os.path.abspath(__file__))
     parent_dir = os.path.dirname(script_dir)

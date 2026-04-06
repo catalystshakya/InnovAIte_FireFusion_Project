@@ -12,7 +12,14 @@ import os
 
 
 def load_data(gdb_path):
-    """Load GeoDatabase file and filter to Victorian records."""
+    """Load GeoDatabase file and filter to Victorian records.
+    
+    Parameters:
+        gdb_path (str): Path to BushfireEvents.gdb directory
+    
+    Returns:
+        vic_gdf (GeoDataFrame): Victorian records from National_Historical_Bushfire_Extents_v4 layer, filtered to state=="VIC (Victoria)"; CRS EPSG:4326;
+    """
     vic_bbox = box(130, -29, 160, -43)
     gdf = gpd.read_file(gdb_path, layer="National_Historical_Bushfire_Extents_v4", bbox=vic_bbox)
     vic_gdf = gdf[gdf["state"] == "VIC (Victoria)"].reset_index()
@@ -20,13 +27,29 @@ def load_data(gdb_path):
 
 
 def data_quality_check(vic_gdf):
-    """Check for nulls and drop columns with no usable data."""
+    """Drops columns with no usable data.
+    
+     Parameters:
+        vic_gdf (GeoDataFrame): Victorian bushfire records
+    
+    Returns:
+        vic_gdf (GeoDataFrame): Same dataset with columns [capture_date, extinguish_date, ignition_cause, capt_method] removed; row count unchanged
+    """
     vic_gdf = vic_gdf.drop(columns=["capture_date", "extinguish_date", "ignition_cause", "capt_method"])
     return vic_gdf
 
 
 def filter_to_period(vic_gdf, start_date="2018-07-01", end_date="2022-07-31"):
-    """Filter to specified time period and remove zero-area records."""
+    """Filter to specified time period and remove zero-area records.
+    
+    Parameters:
+        vic_gdf (GeoDataFrame): Victorian bushfire records with ignition_date, area_ha columns
+        start_date (str): Start date (default "2018-07-01"); format YYYY-MM-DD
+        end_date (str): End date (default "2022-07-31"); format YYYY-MM-DD
+    
+    Returns:
+        vic_gdf (GeoDataFrame): Filtered dataset with only records where ignition_date in [start_date, end_date] and area_ha > 0
+    """
     vic_gdf = vic_gdf[
         (vic_gdf["ignition_date"] >= start_date) &
         (vic_gdf["ignition_date"] <= end_date)
@@ -37,7 +60,16 @@ def filter_to_period(vic_gdf, start_date="2018-07-01", end_date="2022-07-31"):
 
 
 def engineer_features(vic_gdf):
-    """Engineer season and geometry-based features."""
+    """Engineer season and geometry-based features.
+    
+    Parameters:
+        vic_gdf (GeoDataFrame): Victorian bushfire records with ignition_date, area_ha, geometry columns
+    
+    Returns:
+        vic_gdf (GeoDataFrame): Same dataset with new columns: season (str: Summer/Autumn/Winter/Spring), area_m2 (float, in projected CRS), perimeter_m (float, in projected CRS),
+            compactness (float: 4π*area/perimeter²), log_area (float: log1p(area_ha)), size_class (str: small/medium/large/mega); CRS returned to EPSG:4326;
+    """
+    
     def get_season(month):
         if month in [12, 1, 2]:
             return "Summer"
@@ -74,13 +106,29 @@ def engineer_features(vic_gdf):
 
 
 def filter_to_bushfires(vic_gdf):
-    """Filter dataset to bushfire events only (exclude prescribed burns)."""
+    """Filter dataset to bushfire events only (exclude prescribed burns).
+    Parameters:
+        vic_gdf (GeoDataFrame): Victorian fire records with fire_type column
+    
+    Returns:
+        vic_gdf (GeoDataFrame): Filtered dataset with only fire_type=="Bushfire" records
+    """
+    
     vic_gdf = vic_gdf[vic_gdf["fire_type"] == "Bushfire"].reset_index(drop=True)
     return vic_gdf
 
 
 def finalize_and_export(vic_gdf, output_csv, output_geojson):
-    """Reorder columns and export to CSV and GeoJSON."""
+    """Reorder columns and export to CSV and GeoJSON.
+    Parameters:
+        vic_gdf (GeoDataFrame): Complete bushfire dataset with all computed columns
+        output_csv (str): Output file path for CSV (e.g., "historic_fire_extents_data.csv")
+        output_geojson (str): Output file path for GeoJSON (e.g., "historic_fire_extents_data.geojson")
+    
+    Returns:
+        vic_gdf (GeoDataFrame): Same dataset with columns reordered to fixed sequence [fire_id, fire_name, ignition_date, season, fire_type, size_class, area_ha, perim_km, compactness, log_area, SHAPE_Length, SHAPE_Area, geometry]
+        writes CSV and GeoJSON files to disk, prints record count and file paths
+    """
     column_order = [
         "fire_id", "fire_name", "ignition_date", "season",
         "fire_type", "size_class", "area_ha", "perim_km", "compactness", "log_area",
@@ -99,8 +147,16 @@ def finalize_and_export(vic_gdf, output_csv, output_geojson):
 
 
 def main(output_csv="historic_fire_extents_data.csv", output_geojson="historic_fire_extents_data.geojson"):
-    """Main processing pipeline."""
+    """Main processing pipeline.
     
+    Parameters:
+        output_csv (str): Output filename for CSV (default "historic_fire_extents_data.csv")
+        output_geojson (str): Output filename for GeoJSON (default "historic_fire_extents_data.geojson")
+    
+    Returns:
+        vic_gdf (GeoDataFrame): Complete processed Victorian bushfire dataset; side effects
+        writes CSV and GeoJSON files to script directory, prints progress messages at each stage
+    """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     data_dir = os.path.join(script_dir, "data")
     gdb_path = os.path.join(data_dir, "BushfireEvents.gdb/")

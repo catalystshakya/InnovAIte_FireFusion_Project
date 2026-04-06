@@ -13,7 +13,17 @@ import os
 
 
 def load_and_combine_data(n20_path, n_path, modis_path):
-    """Load raw satellite CSV exports and combine into single dataframe."""
+    """Load raw satellite CSV exports and combine into single dataframe with unified confidence values.
+    
+    Parameters:
+        n20_path (str): Path to NOAA-20 (J1) VIIRS detections CSV
+        n_path (str): Path to NOAA (S-NPP) VIIRS detections CSV
+        modis_path (str): Path to MODIS detections CSV
+    
+    Returns:
+        df (DataFrame): Combined detections from all three sources with columns [acq_date, acq_time, brightness, bright_t31, frp, confidence, latitude, longitude, daynight, satellite]; 
+            confidence mapped to "l"(low), "n"(medium), "h"(high); sorted by acq_date, acq_time
+    """
     n20_df = pd.read_csv(n20_path)
     n_df = pd.read_csv(n_path)
     m_df = pd.read_csv(modis_path)
@@ -36,7 +46,14 @@ def load_and_combine_data(n20_path, n_path, modis_path):
 
 
 def filter_to_victoria(df):
-    """Apply bounding box filter to isolate Victorian detections."""
+    """Apply bounding box filter to isolate Victorian detections.
+    
+    Parameters:
+        df (DataFrame): Raw satellite detections with latitude, longitude columns
+    
+    Returns:
+        vic_df (DataFrame): Filtered detections within Victoria bounding box [lat -39.2 to -34.0, lon 140.9 to 150.0]; sorted by acq_date, acq_time
+    """
     vic_df = df[(df["latitude"] >= -39.2) &
                 (df["latitude"] <= -34.0) &
                 (df["longitude"] >= 140.9) &
@@ -46,7 +63,15 @@ def filter_to_victoria(df):
 
 
 def grid_cells(vic_df):
-    """Project to local CRS, snap to 1km² cells, aggregate per pass."""
+    """Project to local CRS, snap to 1km² cells, aggregate per cell per satellite pass.
+    
+    Parameters:
+        vic_df (DataFrame): Victorian detections with latitude, longitude, confidence, brightness, bright_t31, frp, acq_date, acq_time, daynight, satellite
+    
+    Returns:
+        grid_gdf (GeoDataFrame): Gridded aggregates with columns [cell_x, cell_y, acq_date, daynight, satellite, brightness (max), bright_t31 (max), frp_peak (max), frp_cumulative (sum), confidence (max), 
+            acq_time (max), geometry (1km² cell as Polygon), longitude, latitude]; CRS EPSG:4326; sorted by acq_date, daynight, satellite; one row per unique (cell_x, cell_y, acq_date, daynight, satellite) group
+    """
     gdf = gpd.GeoDataFrame(
         vic_df,
         geometry=gpd.points_from_xy(vic_df.longitude, vic_df.latitude),
@@ -106,7 +131,15 @@ def grid_cells(vic_df):
 
 
 def engineer_temporal_features(grid_gdf):
-    """Build datetime, pass-level timestamps, and time-since-prev-pass."""
+    """Build datetime, pass-level timestamps, and time-since-prev-pass.
+    
+    Parameters:
+        grid_gdf (GeoDataFrame): Gridded detections with acq_date (YYYY-MM-DD), acq_time (HHMM), satellite, daynight columns
+    
+    Returns:
+        grid_gdf (GeoDataFrame): Same dataset with new columns: datetime (merged acq_date + acq_time, timezone-naive), pass_datetime (min datetime per satellite/acq_date/daynight group), 
+            time_since_prev_pass (seconds since previous pass for same satellite, 0 for first pass); sorted by pass_datetime
+    """
     grid_gdf["datetime"] = pd.to_datetime(
         grid_gdf["acq_date"].astype(str) + " " + grid_gdf["acq_time"].astype(str).str.zfill(4),
         format="%Y-%m-%d %H%M"
@@ -140,7 +173,15 @@ def engineer_temporal_features(grid_gdf):
 
 
 def compute_burning_neighbors(df, radius=2):
-    """Count burning neighbors at given radius for current timestep."""
+    """Count burning neighbors at given radius for current timestep.
+    
+     Parameters:
+        df (DataFrame): Gridded detections with cell_x, cell_y, pass_datetime, is_burning columns
+        radius (int): Search radius in cells (default 2); uses Chebyshev distance approximation (radius * sqrt(2))
+    
+    Returns:
+        neighbors (ndarray): Integer count of burning neighbors per row; same length as input
+    """
     neighbors = np.zeros(len(df), dtype=int)
     
     for pass_dt, group in df.groupby("pass_datetime"):
@@ -157,7 +198,15 @@ def compute_burning_neighbors(df, radius=2):
 
 
 def compute_prev_burning_neighbors(df, radius=2):
-    """Count burning neighbors in previous timestep."""
+    """Count burning neighbors in previous timestep.
+    
+     Parameters:
+        df (DataFrame): Gridded detections with cell_x, cell_y, pass_datetime, is_burning columns
+        radius (int): Search radius in cells (default 2); uses Chebyshev distance approximation (radius * sqrt(2))
+    
+    Returns:
+        neighbors (ndarray): Float count of burning neighbors in previous pass per row; same length as input; 0 for first pass or if no previous data exists
+    """
     neighbors = np.zeros(len(df), dtype=float)
     pass_times = df["pass_datetime"].drop_duplicates().sort_values().values
     
@@ -188,7 +237,15 @@ def compute_prev_burning_neighbors(df, radius=2):
 
 
 def engineer_spatial_features(grid_gdf):
-    """Compute burning neighbors at r=1 and r=2 for current and previous timesteps."""
+    """Compute burning neighbors at r=1 and r=2 for current and previous timesteps.
+    
+    Parameters:
+        grid_gdf (GeoDataFrame): Gridded detections with cell_x, cell_y, pass_datetime columns
+    
+    Returns:
+        grid_gdf (GeoDataFrame): Same dataset with new columns: is_burning (constant 1 for all rows, indicator of detection), burning_neighbors_r1 (neighbors at radius 1 now), burning_neighbors_r2 (neighbors at radius 2 now), 
+            burning_neighbors_prev_r1 (neighbors at radius 1 in previous pass), burning_neighbors_prev_r2 (neighbors at radius 2 in previous pass)
+    """
     grid_gdf["is_burning"] = 1
     
     grid_gdf["burning_neighbors_r1"] = compute_burning_neighbors(grid_gdf, radius=1)
@@ -200,7 +257,15 @@ def engineer_spatial_features(grid_gdf):
 
 
 def engineer_temporal_targets(grid_gdf):
-    """Create previous/next burn state and FRP targets for supervised learning."""
+    """Create lagged (previous) and lead (next) burn state and FRP values for supervised learning.
+    
+    Parameters:
+        grid_gdf (GeoDataFrame): Gridded detections with cell_x, cell_y, pass_datetime, is_burning, frp_peak columns
+    
+    Returns:
+        grid_gdf (GeoDataFrame): Same dataset with new columns: is_burning_prev (previous burn state, 0 for first pass per cell), frp_prev (previous FRP, 0 for first pass per cell), 
+            is_burning_next (next burn state, 0 for last pass per cell), frp_next (next FRP, 0 for last pass per cell); all new columns are numeric (int or float)
+    """
     grid_gdf = grid_gdf.sort_values(["cell_x", "cell_y", "pass_datetime"])
     
     # Previous state
@@ -215,7 +280,18 @@ def engineer_temporal_targets(grid_gdf):
 
 
 def finalize_and_export(grid_gdf, output_csv, output_geojson):
-    """Reorder columns, encode categorical features, export to CSV and GeoJSON."""
+    """Encode categorical features, reorder columns, and export to CSV and GeoJSON formats.
+    
+    Parameters:
+        grid_gdf (GeoDataFrame): Complete satellite data with all engineered features; daynight column contains "D" or "N" values
+        output_csv (str): Output file path for CSV (e.g., "satellite_fire_data.csv")
+        output_geojson (str): Output file path for GeoJSON (e.g., "satellite_fire_data.geojson")
+    
+    Returns:
+        grid_gdf (GeoDataFrame): Same dataset with daynight encoded as numeric (0=Day, 1=Night), columns reordered to fixed sequence [cell_x, cell_y, datetime, daynight, satellite, time_since_prev_pass, confidence, is_burning, brightness, bright_t31, 
+            frp_peak, frp_cumulative, burning_neighbors_r1, burning_neighbors_r2, is_burning_prev, frp_prev, burning_neighbors_prev_r1, burning_neighbors_prev_r2, is_burning_next, frp_next, longitude, latitude, geometry], sorted by pass_datetime; 
+        writes CSV and GeoJSON files to disk, prints record count and file paths
+    """
     # Encode daynight
     grid_gdf["daynight"] = grid_gdf["daynight"].map({"D": 0, "N": 1})
     
@@ -242,7 +318,16 @@ def finalize_and_export(grid_gdf, output_csv, output_geojson):
     return grid_gdf
 
 def main(output_csv="satellite_fire_data.csv", output_geojson="satellite_fire_data.geojson"):
-    """Main processing pipeline."""
+    """Main processing pipeline.
+    
+    Parameters:
+        output_csv (str): Output filename for CSV (default "satellite_fire_data.csv")
+        output_geojson (str): Output filename for GeoJSON (default "satellite_fire_data.geojson")
+    
+    Returns:
+        grid_gdf (GeoDataFrame): Complete processed satellite dataset with temporal/spatial features and ML targets
+        writes CSV and GeoJSON files to script directory, prints progress messages at each pipeline stage
+    """
     
     script_dir = os.path.dirname(os.path.abspath(__file__))
     data_dir = os.path.join(script_dir, "data")

@@ -53,7 +53,7 @@ To use the script, download the above raw NASA exports, place the downloaded dat
 | **is_burning_prev** | int | Binary flag; `1` if cell detected fire at the previous timestep |
 | **frp_prev** | float | Peak FRP in this cell in the previous timestep |
 | **burning_neighbors_prev_r1** | int | Count of cells burning in radius 1-cell neighbourhood in the previous timestep (0-8) |
-| **burning_neighbors_prev_r2** | int | Count of cells burning in radius 2-cell neighbourhood in the same timestep (0-24) |
+| **burning_neighbors_prev_r2** | int | Count of cells burning in radius 2-cell neighbourhood in the previous timestep (0-24) |
 | **is_burning_next** | int | Binary flag; `1` if cell detected fire at next pass (prediction target) |
 | **frp_next** | float | Peak FRP at this cell in next timestep (prediction target) |
 | **longitude** | float | Cell centroid longitude (EPSG:4326) |
